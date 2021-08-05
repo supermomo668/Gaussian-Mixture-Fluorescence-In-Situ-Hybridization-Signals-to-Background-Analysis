@@ -261,21 +261,21 @@ class SNRAnalysis:
         print("[PROCESS]Labels:", labels)
         #label_img = diameter_closing(label_img, diameter_threshold=3**2)   # close holes
         ## Find peaks
-        coordinates_initial = peak_local_max(im, min_distance=15)
-        print("[PROCESS]Number of Local Maximum Candidates:", len(coordinates_unfiltered))
+        coords_init = peak_local_max(im, min_distance=15)
+        print("[PROCESS]Number of Local Maximum Candidates:", len(coords_init))
         # Spots filtering
-        coordinates_filtered = np.zeros((0, coordinates_unfiltered.shape[1]))
-        for coord in coordinates_unfiltered:
-            pixel_label = label_img[coord[0],coord[1]]; intensity = im[coord[0],coord[1]]   #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        coors_filtered = np.zeros((0, coords_init.shape[1]))
+        for c in coords_init:
+            pixel_label = label_img[c[0],c[1]]; intensity = im[c[0],c[1]]   #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
             if pixel_label == labels['fg']:    # Spots or Fg
                 if intensity < np.min(spot_thres):  # Considered bg
-                    label_img[coord[0],coord[1]] = labels['bg'] # Label spot coordinate as label
+                    label_img[c[0],c[1]] = labels['bg'] # Label spot coordinate as label
                 elif intensity > np.max(spot_thres): # Still fg
                     pass
                 else:  # passed thres check
                     label_img[coord[0],coord[1]] = labels['spot']
-                    coordinates_filtered = np.vstack((coordinates_filtered, coord))
-        return coordinates_filtered, label_img, labels
+                    coors_filtered = np.vstack((coors_filtered, c))
+        return coors_filtered, label_img, labels
     
     def calc_max(self, summary_df:pd.DataFrame, img_name:str, shifts:tuple, spot_thres:tuple, k=2):
         '''
