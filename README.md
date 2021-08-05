@@ -21,5 +21,5 @@ Changing the code file is not recommended.
 
 # More Information
 
-The program CAN be set to use all images at once and help the thresholding to be more generalized thus more accurate instead of just using the information in a single FOV. It can also make use of control background images to make much better estimation of SNR ratios.
+The program is experimental but is scientifically sound. It makes use of available information to disguish signals and background (if background is not provided). It can also make use of control background images to make much better estimation of SNR ratios.
 
