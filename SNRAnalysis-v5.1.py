@@ -204,12 +204,11 @@ class SNRAnalysis:
         else:
             return None, summary_df
     
-    def get_spotthres(self, summary_df:pd.DataFrame):
+    def get_spotthres(self, summary_df:pd.DataFrame, chs:list):
         ''' 
         Return final threshold of each channel
         Summary_df: Use FULL!!!!!!
         '''
-        chs = summary_df["Channel"].unique()
         all_thresholds = dict()
         for ch in chs:
             if self.use_montage:   # Settings
@@ -252,24 +251,19 @@ class SNRAnalysis:
         ## Handle exception of the roots
         if low_bound == high_bound:
             low_bound = min(0, low_bound); high_bound = high_bound
-        return (low_bound, high_bound), roots
+        return (low_bound, high_bound), roots   
     
-    def bgsub_solve(self, im):
-        '''
-        Separate although similar pipeline for analyzing subtracted image:
-        ALL peak local max is considered signals
-        '''
-        print("[INFO]Image shape after subtraction:", im.shape)
-        print("[INFO]Image stats(mean/min/max):", im.mean(), im_sub.min(), im.max())
-        label_img, means, covs = gmm(im, k=k)
+    def find_filter_spot(self, im, spot_thres =(0, np.inf)):
+        print("[INFO]Image stats(median/min/max):", np.median(im), im.min(), im.max())
+        label_img, means, covs = gmm(im, k=2)
         bg_label, fg_label = np.argsort(means); spot_label = max(fg_label,bg_label)+1
+        labels = {'bg': bg_label, 'fg':fg_label, 'spot':spot_label}
+        print("[PROCESS]Labels:", labels)
+        #label_img = diameter_closing(label_img, diameter_threshold=3**2)   # close holes
+        ## Find peaks
         coordinates_initial = peak_local_max(im, min_distance=15)
-        label_img2 = np.zeros(label_img.shape); label_img2[coordinates_unfiltered]=1
-        intensities["(BG-sub)Spots"]= im_origin[label_img2==1].ravel()
-        intensities["(BG-sub)Bg"]= im_origin[label_img2==0].ravel()
-    
-    def spotcoords_filter_by_thres(self, coordinates_unfiltered, im, label_img, 
-                               spot_thres =[0, np.inf], labels:dict.fromkeys(['bg','fg','spot'])):
+        print("[PROCESS]Number of Local Maximum Candidates:", len(coordinates_unfiltered))
+        # Spots filtering
         coordinates_filtered = np.zeros((0, coordinates_unfiltered.shape[1]))
         for coord in coordinates_unfiltered:
             pixel_label = label_img[coord[0],coord[1]]; intensity = im[coord[0],coord[1]]   #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -281,7 +275,7 @@ class SNRAnalysis:
                 else:  # passed thres check
                     label_img[coord[0],coord[1]] = labels['spot']
                     coordinates_filtered = np.vstack((coordinates_filtered, coord))
-        return coordinates_filter
+        return coordinates_filtered, label_img, labels
     
     def calc_max(self, summary_df:pd.DataFrame, img_name:str, shifts:tuple, spot_thres:tuple, k=2):
         '''
@@ -293,43 +287,27 @@ class SNRAnalysis:
         k: guassian mixture model number of clusters
         diameter threshold: what diameter is a standalone (false) spot
         '''
-        # Display "spots" information for single instance
+        intensities = {k:[] for k in ["Bg", "Fg", "Spots"]}
         im = plt.imread(summary_df.loc[img_name]["Path"])
-        if summary_df.loc[img_name]["Bg-Path"] and self.use_bg:   # Perform Image Background subtraction processing
+        if summary_df.loc[img_name]["Bg-Path"] and self.use_bg:   
+            # Perform Image Background subtraction & spot filtering
             im_sub, (cyc_xshift, cyc_y_shift) = subtract_bg(shifts[0], shifts[1], 
                             cyc_img_path=summary_df.loc[img_name]["Bg-Path"], bg_img_path=summary_df.loc[img_name]["Path"])
+            print("[INFO]Image shape after subtraction:", im_sub.shape)
+            # Filter spots: ONLY lower bound (NO upper bound)
+            coordinates_filtered, label_img, labels = self.find_filter_spot(im_sub, spot_thres=(np.median(im_sub),np.inf))
+            intensities["(BG-sub)Spots"] = im[label_img==labels['spot']].ravel()
+            intensities["(BG-sub)Bg"] = im[label_img==labels['bg']].ravel()
+            # An original but cropped (due to shift correction)
             im_crop = im_origin[cyc_xshift[0]:s+cyc_xshift[1], cyc_y_shift[0]:s+cyc_y_shift[1]]
-            self.bgsub_solve(im_sub)
-            
-        label_img, means, covs = gmm(im, k=k)
-        #label_img = diameter_closing(label_img, diameter_threshold=3**2)   # close holes
-        bg_label, fg_label = np.argsort(means); spot_label = max(fg_label,bg_label)+1
-        labels = {'bg': bg_label, 'fg':fg_label, 'spot':spot_label}
-        print("[PROCESS]Labels:", labels)
-        ## Find peaks
         
-        coordinates_unfiltered = peak_local_max(im, min_distance=15)
-        print("[PROCESS]Number of Local Maximum Candidates:", len(coordinates_unfiltered))
-        coordinates_filtered = np.zeros((0, coordinates_unfiltered.shape[1]))
-        intensities = {k:[] for k in ["Spots", "Bg", "Fg"]}
-        # Filter peaks by threshold
-        for coord in coordinates_unfiltered:
-            pixel_label = label_img[coord[0],coord[1]]; intensity = im[coord[0],coord[1]]   #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            if pixel_label != bg_label and (intensity<np.max(spot_thres) and
-                                            intensity>np.min(spot_thres)):  # Pixel is not a background, meet threshold
-                label_img[coord[0],coord[1]] = spot_label; # Label spot coordinate as label
-                coordinates_filtered = np.vstack((coordinates_filtered, coord))
-        intensities["Fg"]= im[label_img==fg_label].ravel()
-        intensities["Bg"]= im[label_img==bg_label].ravel()
-        intensities["Spots"]= im[label_img==spot_label].ravel()
-            
+        coordinates_filtered, label_img, labels = self.find_filter_spot(im=im, spot_thres=spot_thres)
+
         print("[PROCESS]Spots filtered", len(coordinates_unfiltered)-len(coordinates_filtered),
               "|Remained",len(coordinates_filtered))
-        print("Intensities:",intensities)
-        for n, label in enumerate(np.argsort(means)):
-            if label==bg_label: label_name="Bg" 
-            elif label==fg_label: label_name="Fg"
-            else: label_name="Spots"
+        intensities["Fg"]= im[label_img==labels['fg']].ravel()
+        intensities["Bg"]= im[label_img==labels['bg']].ravel()
+        intensities["Spots"]= im[label_img==labels['spot']].ravel()    
         return intensities
 
     def calc_S2N(self, intensities):
@@ -374,7 +352,7 @@ class SNRAnalysis:
             print("[Info]Randomly select",len(cyc_summary_df),"for analysis.")
         print("[Info]Total", len(cyc_summary_df),"images for analysis.")
         # Spot thres
-        spot_thres_by_channel = self.get_spotthres(summary_df_fullcyc)
+        spot_thres_by_channel = self.get_spotthres(summary_df_fullcyc, chs = cyc_summary_df["Channel"].unique())
         print("[Process]Using threshold filter:",
               [(k+':'+str(v)) for k,v in spot_thres_by_channel.items()],sep='\n')
         # Background subtration
@@ -385,6 +363,7 @@ class SNRAnalysis:
             intensities = self.calc_max(summary_df=cyc_summary_df, 
                                         spot_thres=spot_thres_by_channel[cyc_summary_df.loc[img_name,'Channel']],
                                         img_name = img_name, shifts=cyc_shifts)
+            print("[INFO]Intensities:",intensities)
             info = self.calc_S2N(intensities); info["Shift"]=str(cyc_shifts)
             cyc_summary_df.loc[img_name, info.keys()] = pd.Series(info)
         if self.save2cycFolder:
