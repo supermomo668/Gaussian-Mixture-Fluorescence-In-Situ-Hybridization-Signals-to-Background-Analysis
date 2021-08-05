@@ -8,7 +8,7 @@ Uses Peak Local Maximum to generate spot candidates then uses Gaussian Mixture M
 Generate intensitites for Spots, Foreground, Background. Then also output the SNR ratio for each FOVs. The results is outputted to a spreadsheet (.csv).
 
 # Instructions
-You should be able to drop the **SNR-Analysis-v3.py** (or v4) file in the experimental folder (Along with "Cyc01R", "Cyc02R"...etc) and just double click to run with the "Default" settings)
+You should be able to drop the **SNR-Analysis-v3.1.py** (or v5) file in the experimental folder (Along with "Cyc01R", "Cyc02R"...etc) and just double click to run with the "Default" settings)
 
 However, if you want to select your own, you need to use the file **SNRA-settings.ini**. Edit the **FOV** portion under **User Settings** section and set it to 
 ```
