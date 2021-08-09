@@ -98,8 +98,8 @@ def subtract_bg(x_sh:int, y_sh:int, cyc_img_path:Path, bg_img_path:Path):
     s = cyc_img.shape[0]
     shifted_cyc_img = cyc_img[cyc_x_sh[0]:s+cyc_x_sh[1], cyc_y_sh[0]:s+cyc_y_sh[1]]
     shifted_bg_img = bg_img[cyc_x_sh[0]:s+cyc_x_sh[1], cyc_y_sh[0]:s+cyc_y_sh[1]]
-    bg_subtracted_img = cv2.subtract(shifted_cyc_img, shifted_bg_img);
-    print(bg_subtracted_img)
+    bg_subtracted_img = shifted_cyc_img - shifted_bg_img
+    bg_subtracted_img[np.where(bg_subtracted_img==0)] = 0 ; print(bg_subtracted_img)
     return bg_subtracted_img,  (cyc_x_sh, cyc_y_sh)
 
 def collect_channel_pixel(summary_df, ch="L532S"):
@@ -151,18 +151,25 @@ class SNRAnalysis:
         # Use either FOVs over Random sampling
         if settings.get('FOV', False) and len(settings.get('FOV', False).split(','))>0:
             self.FOVs = settings.get('FOV', False).split(','); self.num_ranSamples = False
-        else: self.num_ranSamples = int(settings.get('NumberSamples', 30))
-        # 
-        self.save2cycFolder = settings.get('save2cycFolder', True)
-        self.use_montage = settings.get('Use_montage', True)
+        else: 
+            self.num_ranSamples = int(settings.get('NumberSamples', 30))
+        # Montage
+        self.use_montage = bool(settings.get('Use_montage', True))
         # Background subtraction
         bg_img_path =exp_path/settings.get('bg_folder','bg')/'AcqData'
-        if settings.get('Use_bg',False) and os.path.exists(bg_img_path): 
+        self.use_bg = bool(settings.get('Use_bg', False))
+        if self.use_bg and os.path.exists(bg_img_path): 
             self.bg_img_path = bg_img_path; self.use_bg = True
             print("[INFO]Found existing background folder:",bg_img_path)
-        else: 
-            self.use_bg = False; self.bg_img_path=None
-            print("[INFO] Not using background subtraction method.")
+        else: self.bg_img_path=None; print("[INFO] Not using background subtraction method.")
+        #
+        self.output_bgsub = bool(settings.get('save_bgsub', False))
+        self.bgsub_fn = "BG-subtracted"
+        # If directory is in AcqData
+        if os.path.exists(self.exp_dir/"AcqData"):
+            self.single_run = True; print("[INFO]Performing single folder run on 'AcqData' folder level.")
+            self.use_bg=self.FOVs=False; self.num_ranSamples = int(settings.get('NumberSamples', 30))
+            self.bg_img_path=None
         #
         self.settings = settings; print("[Settings]", self.settings.items())
         
@@ -273,8 +280,9 @@ class SNRAnalysis:
                 elif intensity > np.max(spot_thres): # Still fg
                     pass
                 else:  # passed thres check
-                    label_img[coord[0],coord[1]] = labels['spot']
+                    label_img[c[0],c[1]] = labels['spot']
                     coors_filtered = np.vstack((coors_filtered, c))
+        print("[PROCESS]Spots filtered", len(coords_init)-len(coors_filtered),"|Remained",len(coors_filtered))
         return coors_filtered, label_img, labels
     
     def calc_max(self, summary_df:pd.DataFrame, img_name:str, shifts:tuple, spot_thres:tuple, k=2):
@@ -296,18 +304,22 @@ class SNRAnalysis:
             print("[INFO]Image shape after subtraction:", im_sub.shape)
             # Filter spots: ONLY lower bound (NO upper bound)
             coordinates_filtered, label_img, labels = self.find_filter_spot(im_sub, spot_thres=(np.median(im_sub),np.inf))
-            intensities["(BG-sub)Spots"] = im[label_img==labels['spot']].ravel()
-            intensities["(BG-sub)Bg"] = im[label_img==labels['bg']].ravel()
+            print((label_img==labels['spot'])[:,0].min(),(label_img==labels['spot'])[:,0].max())
+            intensities["(BG-sub)Spots"] = im[np.where(label_img==labels['spot'])].ravel()
+            intensities["(BG-sub)Bg"] = im[np.where(label_img==labels['bg'])].ravel()
             # An original but cropped (due to shift correction)
-            im_crop = im_origin[cyc_xshift[0]:s+cyc_xshift[1], cyc_y_shift[0]:s+cyc_y_shift[1]]
-        
+            im_crop = im[cyc_xshift[0]:im.shape[0]+cyc_xshift[1], cyc_y_shift[0]:im.shape[0]+cyc_y_shift[1]]
+            # Write bg_subtracted crop image
+            if self.output_bgsub: 
+                print("[INFO]Saved background image:",(img_name+'.tif'))
+                cv2.imwrite(str(self.bgsub_output_path/(img_name+'.tif')), im_sub)
+                
+        ## Find+filter spots
         coordinates_filtered, label_img, labels = self.find_filter_spot(im=im, spot_thres=spot_thres)
-
-        print("[PROCESS]Spots filtered", len(coordinates_unfiltered)-len(coordinates_filtered),
-              "|Remained",len(coordinates_filtered))
-        intensities["Fg"]= im[label_img==labels['fg']].ravel()
-        intensities["Bg"]= im[label_img==labels['bg']].ravel()
-        intensities["Spots"]= im[label_img==labels['spot']].ravel()    
+        
+        intensities["Fg"]= im[np.where(label_img==labels['fg'])].ravel()
+        intensities["Bg"]= im[np.where(label_img==labels['bg'])].ravel()
+        intensities["Spots"]= im[np.where(label_img==labels['spot'])].ravel()    
         return intensities
 
     def calc_S2N(self, intensities):
@@ -366,18 +378,25 @@ class SNRAnalysis:
             print("[INFO]Intensities:",intensities)
             info = self.calc_S2N(intensities); info["Shift"]=str(cyc_shifts)
             cyc_summary_df.loc[img_name, info.keys()] = pd.Series(info)
-        if self.save2cycFolder:
             cyc_summary_df.to_csv(cyc_path/"SNR-summary_cyc.csv")
         return cyc_summary_df
 
     def summarize_snr_for_all(self):
-        cyc_folders = [self.exp_dir/cyc_fp for cyc_fp in os.listdir(self.exp_dir) if 
+        cyc_paths = [self.exp_dir/cyc_fp for cyc_fp in os.listdir(self.exp_dir) if 
                        (cyc_fp.startswith("Cyc") and (self.exp_dir/cyc_fp).is_dir)]
-        print("[Info]Found cycle folders", cyc_folders)
+        print("[Info]Found cycle folders", cyc_paths)
         sum_dfs = []
-        for cyc_folder in cyc_folders:
-            print("[Info] Performing for cycle:",cyc_folder)
-            sum_dfs.append(self.summarize_snr_for_directory(cyc_folder))
+        if self.single_run:
+            print("[Info]Use single run as in 'AcqData' level.")
+            cyc_paths = [self.exp_dir]
+        for cyc_path in cyc_paths:
+            if self.output_bgsub:
+                self.bgsub_output_path =cyc_path/self.bgsub_fn
+                if not os.path.exists(self.bgsub_output_path):
+                    os.mkdir(self.bgsub_output_path)
+                print("[INFO]Bg-subtracted Images saving to:",self.bgsub_output_path)
+            print("[Info] Performing for cycle:",cyc_path.name)
+            sum_dfs.append(self.summarize_snr_for_directory(cyc_path))
         summary_df = pd.concat(sum_dfs, axis=0)
         return summary_df
 
