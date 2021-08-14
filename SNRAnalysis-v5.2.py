@@ -60,7 +60,7 @@ def find_shift(summary_df, cyc_num=1):
     # Picking FOVs (must do a few to ensure)
     reg_rows  = summary_df.loc[[i for i in summary_df.index if 
                             (i.endswith("L473S") and (str(cyc_num)+"R") in i)]]
-    num_of_registers = max(1, min(10, int(len(reg_rows)*0.05)))
+    num_of_registers = max(1, min(10, int(len(reg_rows)*0.1)))
     print("[PROCESS]Registering with ", num_of_registers, "FOVs")
     if len(reg_rows) == 0:
         raise Exception("[Warning]You need L473 from Cyc01R images to register. Otherwise, set Use_bg=0")
@@ -80,6 +80,7 @@ def find_shift(summary_df, cyc_num=1):
     return x_sh , y_sh
 
 def subtract_bg(x_sh:int, y_sh:int, cyc_img_path:Path, bg_img_path:Path):
+    print("[Process]Background subtraction")
     '''
     Returns
     Added cyc image shift
@@ -98,8 +99,10 @@ def subtract_bg(x_sh:int, y_sh:int, cyc_img_path:Path, bg_img_path:Path):
     s = cyc_img.shape[0]
     shifted_cyc_img = cyc_img[cyc_x_sh[0]:s+cyc_x_sh[1], cyc_y_sh[0]:s+cyc_y_sh[1]]
     shifted_bg_img = bg_img[cyc_x_sh[0]:s+cyc_x_sh[1], cyc_y_sh[0]:s+cyc_y_sh[1]]
-    bg_subtracted_img = shifted_cyc_img - shifted_bg_img
-    bg_subtracted_img[np.where(bg_subtracted_img==0)] = 0 ; print(bg_subtracted_img)
+    print("[INFO] BG Image stat:", shifted_bg_img.mean(), shifted_bg_img.min(), shifted_bg_img.max())
+    print("[INFO] Cyc Image stat:", shifted_cyc_img.mean(), shifted_cyc_img.min(), shifted_cyc_img.max())
+    bg_subtracted_img = cv2.subtract(shifted_cyc_img, shifted_bg_img)
+    bg_subtracted_img[np.where(bg_subtracted_img<0)] = 0
     return bg_subtracted_img,  (cyc_x_sh, cyc_y_sh)
 
 def collect_channel_pixel(summary_df, ch="L532S"):
@@ -116,16 +119,16 @@ def gmm(im, k=2):
     return sorted labels based on intesnity
     '''
     gm = GaussianMixture(n_components=k, random_state=0)
-    nonzero_ind = np.where(im>0); zero_ind = np.where(im<=0)
-    pred_labels = gm.fit_predict(im[nonzero_ind].ravel().reshape(-1,1))
+    pred_labels = gm.fit_predict(im.ravel().reshape(-1,1))
+    label_img = pred_labels.reshape(im.shape)
     # rank labels from low to high intesnity
-    label_means = []; labels = np.unique(pred_labels)
+    label_means = []; labels = np.arange(k)
+    print("[INFO]Guassian Class:")
     for l in labels:
-        label_means.append(im[nonzero_ind][np.where(pred_labels==l)].mean())
-    ind = np.argsort(label_means); sorted_labels = labels[ind]
-    label_img = np.full(im.shape, sorted_labels[0])
-    label_img[nonzero_ind] = pred_labels #; labels[zero_ind] = 0 # Labels are already 0
-    return label_img, gm.means_.ravel()[ind], gm.covariances_.ravel()[ind]
+        print("No. Label",l,":", len(im[np.where(label_img==l)]))
+        label_means.append(im[np.where(label_img==l)].mean())
+    ind = np.argsort(label_means); sorted_labels = labels[ind] #; labels[zero_ind] = 0 # Labels are already 0
+    return label_img, gm.means_.ravel()[ind], gm.covariances_.ravel()[ind], sorted_labels
 
 def solve_gaussian(m, std):
     '''Solve Gaussian intersect
@@ -154,10 +157,11 @@ class SNRAnalysis:
         else: 
             self.num_ranSamples = int(settings.get('NumberSamples', 30))
         # Montage
-        self.use_montage = bool(settings.get('Use_montage', True))
+        self.use_montage = int(settings.get('Use_montage', True))
+        
         # Background subtraction
         bg_img_path =exp_path/settings.get('bg_folder','bg')/'AcqData'
-        self.use_bg = bool(settings.get('Use_bg', False))
+        self.use_bg = int(settings.get('Use_bg', False))
         if self.use_bg and os.path.exists(bg_img_path): 
             self.bg_img_path = bg_img_path; self.use_bg = True
             print("[INFO]Found existing background folder:",bg_img_path)
@@ -170,13 +174,15 @@ class SNRAnalysis:
             self.single_run = True; print("[INFO]Performing single folder run on 'AcqData' folder level.")
             self.use_bg=self.FOVs=False; self.num_ranSamples = int(settings.get('NumberSamples', 30))
             self.bg_img_path=None
+        else: self.single_run=False
         #
         self.settings = settings; print("[Settings]", self.settings.items())
         
     def quick_analyze2_by_channel(self, img_paths,
                                   avail_chs=["L473S","L532S","L595S","L647S"], plot=False):
         summary_df = pd.DataFrame(columns=['Img','Path','Channel','Bg-Path', 'Mean', 'Std',
-                'Spot-fg SNR', 'Spot-bg SNR', 'Fg-Bg SNR', 'Spot mean', 'Fg mean', 'Bg mean',
+                'Fg mean', 'Bg mean', 'Fg-Bg SNR', 'Spot mean', 'Spot-fg SNR', 'Spot-bg SNR',
+                '(M)Spot mean', '(M)Spot-fg SNR', '(M)Spot-bg SNR',
                 '(BG-sub)Spot mean','(BG-sub)Bg mean','(BG-sub)SBR','Shift', 'Comment'])
         fp = True
         for img_path in img_paths:
@@ -191,6 +197,7 @@ class SNRAnalysis:
                     print(img_path.name)
                 else: 
                     bg_img_path = None; print('[Warning]No background image:',img_path.name)
+            else: bg_img_path = None
             img = cv2.imread(str(img_path), -1)
             mean, std = norm.fit(img.ravel())
             ch = [ch for ch in avail_chs if ch in fov_name][0]
@@ -239,7 +246,7 @@ class SNRAnalysis:
             fit_input=im; print("[WARNING]There are not spots found")
         else: fit_input=spots; print("[INFO] Using",len(spots),"maximas.")
         print('[INFO] Montage mean/min/max:', fit_input.mean(), fit_input.min(), fit_input.max())
-        labels, means, covs = gmm(fit_input, k=k)
+        labels, means, covs,_ = gmm(fit_input, k=k)
         means, covs = list(zip(*sorted(zip(means, covs)))); means=list(means)
         stds = []
         for l in range(k):  # Do for each label
@@ -258,33 +265,62 @@ class SNRAnalysis:
         ## Handle exception of the roots
         if low_bound == high_bound:
             low_bound = min(0, low_bound); high_bound = high_bound
-        return (low_bound, high_bound), roots   
-    
-    def find_filter_spot(self, im, spot_thres =(0, np.inf)):
-        print("[INFO]Image stats(median/min/max):", np.median(im), im.min(), im.max())
-        label_img, means, covs = gmm(im, k=2)
-        bg_label, fg_label = np.argsort(means); spot_label = max(fg_label,bg_label)+1
+        return (low_bound, high_bound), roots        
+
+    def find_filter_spot(self, im, gaussian, spot_thres =(0, np.inf)):
+        print("[INFO] Find & filter spots: Image stats(median/min/max):", np.median(im), im.min(), im.max())
+        label_img_original, means, covs, l = gaussian
+        bg_label, fg_label = l; spot_label = max(fg_label, bg_label)+1
         labels = {'bg': bg_label, 'fg':fg_label, 'spot':spot_label}
         print("[PROCESS]Labels:", labels)
         #label_img = diameter_closing(label_img, diameter_threshold=3**2)   # close holes
         ## Find peaks
-        coords_init = peak_local_max(im, min_distance=15)
-        print("[PROCESS]Number of Local Maximum Candidates:", len(coords_init))
-        # Spots filtering
-        coors_filtered = np.zeros((0, coords_init.shape[1]))
-        for c in coords_init:
-            pixel_label = label_img[c[0],c[1]]; intensity = im[c[0],c[1]]   #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            if pixel_label == labels['fg']:    # Spots or Fg
-                if intensity < np.min(spot_thres):  # Considered bg
-                    label_img[c[0],c[1]] = labels['bg'] # Label spot coordinate as label
-                elif intensity > np.max(spot_thres): # Still fg
-                    pass
-                else:  # passed thres check
-                    label_img[c[0],c[1]] = labels['spot']
-                    coors_filtered = np.vstack((coors_filtered, c))
-        print("[PROCESS]Spots filtered", len(coords_init)-len(coors_filtered),"|Remained",len(coors_filtered))
-        return coors_filtered, label_img, labels
+        coords_peak = peak_local_max(im, min_distance=20)
+        
+        label_img = label_img_original.copy()
+        # Filter those belonging to "fg"
+        qualifying_spot_coord = coords_peak[np.where(label_img_original[coords_peak[:,0], coords_peak[:,1]] == labels['fg'])]
+        print("[PROCESS]Number of Initial Local Maxima:", len(coords_peak))
+        print("[PROCESS]Number of foreground qualifying spot",len(qualifying_spot_coord))
+        label_img[qualifying_spot_coord[:,0], qualifying_spot_coord[:,1]] = labels['spot']  # [qualifying_spot_loc]
+        #print("[PROCESS]Qualifying spots:", len(qualifying_spot_loc),"\nRemained:", label_img[np.where(label_img==labels['spot'])])
+        # Montage Gaussian Spots filtering
+        def low_intensity_filter(im):
+            return np.where(im<np.min(spot_thres))
+        def high_intensity_filter(im):
+            return np.where(im>np.max(spot_thres))
+        label_img_ = label_img.copy()
+        # 1. Montage Filter stage (spot too low or high)
+        spot_low_coord = qualifying_spot_coord[low_intensity_filter(im[qualifying_spot_coord[:,0],qualifying_spot_coord[:,1]])]
+        label_img[spot_low_coord[:,0], spot_low_coord[:,1]] = labels['bg']
+        spot_high_coord = qualifying_spot_coord[high_intensity_filter(im[qualifying_spot_coord[:,0],qualifying_spot_coord[:,1]])]
+        label_img[spot_high_coord[:,0], spot_high_coord[:,1]] = labels['fg']
+        print("[PROCESS]Spots filtered by threshold", len(label_img[np.where((label_img-label_img_)!=0)]),
+                "|Remained", len(label_img[np.where(label_img==labels['spot'])]))
+        return label_img, labels
     
+    def bgsub_calcmax(self, intensities, summary_df, img_name, shifts, gaussian):
+        im = plt.imread(summary_df.loc[img_name]["Path"])
+        # Perform Image Background subtraction & spot filtering
+        im_sub, (cyc_xshift, cyc_y_shift) = subtract_bg(shifts[0], shifts[1], 
+                        cyc_img_path=summary_df.loc[img_name]["Bg-Path"], bg_img_path=summary_df.loc[img_name]["Path"])
+        print("[INFO]Image shape after subtraction:", im_sub.shape)
+        print("[INFO]Subtracted Image Stats:", im_sub.mean(), im_sub.min(), im_sub.max())
+        gaussian = gmm(im_sub, k=2)
+        # Filter spots: ONLY lower bound (NO upper bound)
+        
+        label_img, labels = self.find_filter_spot(im_sub, gaussian=gaussian, spot_thres=(np.median(im_sub),np.inf))
+        intensities["(BG-sub)Spots"] = im[np.where(label_img==labels['spot'])].ravel()
+        intensities["(BG-sub)Bg"] = im[np.where(label_img==labels['bg'])].ravel()
+        
+        # An original but cropped (due to shift correction)
+        im_crop = im[cyc_xshift[0]:im.shape[0]+cyc_xshift[1], cyc_y_shift[0]:im.shape[0]+cyc_y_shift[1]]
+        # Write bg_subtracted crop image
+        if self.output_bgsub: 
+            print("[INFO]Saved background image:",(img_name+'.tif'))
+            cv2.imwrite(str(self.bgsub_output_path/(img_name+'.tif')), im_sub)
+        return intensities
+
     def calc_max(self, summary_df:pd.DataFrame, img_name:str, shifts:tuple, spot_thres:tuple, k=2):
         '''
         Take a single FOV and return "spot" intensity & "non-spot" intensity, as determined by
@@ -297,29 +333,35 @@ class SNRAnalysis:
         '''
         intensities = {k:[] for k in ["Bg", "Fg", "Spots"]}
         im = plt.imread(summary_df.loc[img_name]["Path"])
-        if summary_df.loc[img_name]["Bg-Path"] and self.use_bg:   
-            # Perform Image Background subtraction & spot filtering
-            im_sub, (cyc_xshift, cyc_y_shift) = subtract_bg(shifts[0], shifts[1], 
-                            cyc_img_path=summary_df.loc[img_name]["Bg-Path"], bg_img_path=summary_df.loc[img_name]["Path"])
-            print("[INFO]Image shape after subtraction:", im_sub.shape)
-            # Filter spots: ONLY lower bound (NO upper bound)
-            coordinates_filtered, label_img, labels = self.find_filter_spot(im_sub, spot_thres=(np.median(im_sub),np.inf))
-            print((label_img==labels['spot'])[:,0].min(),(label_img==labels['spot'])[:,0].max())
-            intensities["(BG-sub)Spots"] = im[np.where(label_img==labels['spot'])].ravel()
-            intensities["(BG-sub)Bg"] = im[np.where(label_img==labels['bg'])].ravel()
-            # An original but cropped (due to shift correction)
-            im_crop = im[cyc_xshift[0]:im.shape[0]+cyc_xshift[1], cyc_y_shift[0]:im.shape[0]+cyc_y_shift[1]]
-            # Write bg_subtracted crop image
-            if self.output_bgsub: 
-                print("[INFO]Saved background image:",(img_name+'.tif'))
-                cv2.imwrite(str(self.bgsub_output_path/(img_name+'.tif')), im_sub)
-                
+        label_img, means, covs, l = gmm(im, k=2)
+
+        if summary_df.loc[img_name]["Bg-Path"] and self.use_bg:   ######  Background-subtracted Image
+            intensities = self.bgsub_calcmax(intensities, summary_df, img_name, shifts, (label_img, means, covs, l ))
         ## Find+filter spots
-        coordinates_filtered, label_img, labels = self.find_filter_spot(im=im, spot_thres=spot_thres)
-        
-        intensities["Fg"]= im[np.where(label_img==labels['fg'])].ravel()
-        intensities["Bg"]= im[np.where(label_img==labels['bg'])].ravel()
-        intensities["Spots"]= im[np.where(label_img==labels['spot'])].ravel()    
+        label_img_selfthres = label_img.copy()
+        # Self Gaussian filtering: 
+        means = [np.mean(im[np.where(label_img==i)]) for i in l]
+        stds = [np.std(im[np.where(label_img==i)]) for i in l]
+        intercepts = solve_gaussian(means, stds).ravel()
+        print("[INFO]Foreground/Background Intercepts", intercepts)
+        if not len(intercepts)== 1:
+            if means[0] >= min(intercepts): midpoint=max(intercepts)
+            elif means[1] <= max(intercepts): midpoint=min(intercepts)
+            elif (means[0] >= min(intercepts) and means[1] <= max(intercepts)):
+                midpoint=np.mean(intercepts)
+        print("[INFO] Chosen Fg/Bg midpoint:",midpoint)
+        print("[Process] Filtering by self-thresholding: Low bound",midpoint)
+        label_img_selfthres, labels_ = self.find_filter_spot(
+            im=im, gaussian=(label_img, means, covs, l), spot_thres=(midpoint, np.inf))
+        print("[Process] Filtering by Montage-defined thresholding: Low bound", spot_thres[0],"|High bound",spot_thres[1])
+        # Then, montage-based thresholding
+        label_img_thres, labels_ = self.find_filter_spot(
+            im=im, gaussian=(label_img, means, covs, l), spot_thres=spot_thres)
+        intensities["Spots"] = im[np.where(label_img_selfthres==labels_['spot'])].ravel()
+        intensities["Fg"]= im[np.where(label_img_selfthres==labels_['fg'])].ravel()
+        intensities["Bg"]= im[np.where(label_img_selfthres==labels_['bg'])].ravel()
+        if self.use_montage:
+            intensities["(M)Spots"]= im[np.where(label_img_thres==labels_['spot'])].ravel()
         return intensities
 
     def calc_S2N(self, intensities):
@@ -327,21 +369,32 @@ class SNRAnalysis:
         comment=""
         for n in ["Spots","Fg","Bg"]:
             if len(intensities)==0: comment+= "Warning: No pixel belonged in "+n+"\n"
-        spot_mean = rms(intensities["Spots"])
         fg_mean = rms(intensities["Fg"])
         bg_mean = rms(intensities["Bg"])
         fg_snr = fg_mean/bg_mean
+        spot_mean = rms(intensities["Spots"])
         spot_fg_snr = spot_mean/fg_mean
         spot_bg_snr = spot_mean/bg_mean
+        if self.use_montage:
+            mspot_mean = rms(intensities["(M)Spots"])
+            mspot_fg_snr = mspot_mean/fg_mean
+            mspot_bg_snr = mspot_mean/bg_mean
+        else: mspot_mean = mspot_fg_snr = mspot_bg_snr = None
         if self.use_bg:
             bgsub_spot_mean = rms(intensities["(BG-sub)Spots"])
             bgsub_bg_mean = rms(intensities["(BG-sub)Bg"])
             bgsub_sbr = bgsub_spot_mean/bgsub_bg_mean
+        else:
+            bgsub_spot_mean= bgsub_bg_mean=bgsub_sbr=None
         #std = np.std(intensities[label_name])
-        return {"Spot-fg SNR":spot_fg_snr,"Spot-bg SNR":spot_bg_snr, "Fg-Bg SNR":fg_snr, 
-               "Spot mean": spot_mean,"Fg mean":fg_mean, "Bg mean":bg_mean,
-               '(BG-sub)Spot mean':bgsub_spot_mean,'(BG-sub)Bg mean':bgsub_bg_mean,
-               '(BG-sub)SBR':bgsub_sbr, 'Comment':comment}
+        all_info = {"Spot mean":spot_mean, "Spot-fg SNR":spot_fg_snr, "Spot-bg SNR":spot_bg_snr,
+            "(M)Spot-fg SNR":mspot_fg_snr, "(M)Spot-bg SNR":mspot_bg_snr, "Fg-Bg SNR":fg_snr, 
+            "(M)Spot mean": mspot_mean, "Fg mean":fg_mean, "Bg mean":bg_mean,
+            '(BG-sub)Spot mean':bgsub_spot_mean,'(BG-sub)Bg mean':bgsub_bg_mean,
+            '(BG-sub)SBR':bgsub_sbr, 'Comment':comment}
+        for k,v in all_info.items(): 
+            if isinstance(all_info[k],int) or isinstance(all_info[k],float): all_info[k] = np.round(v,2)
+        return all_info
 
     
     def summarize_snr_for_directory(self, cyc_path: Path, fn:str = "AcqData"):
@@ -375,7 +428,7 @@ class SNRAnalysis:
             intensities = self.calc_max(summary_df=cyc_summary_df, 
                                         spot_thres=spot_thres_by_channel[cyc_summary_df.loc[img_name,'Channel']],
                                         img_name = img_name, shifts=cyc_shifts)
-            print("[INFO]Intensities:",intensities)
+            #print("[INFO]Intensities:",intensities)
             info = self.calc_S2N(intensities); info["Shift"]=str(cyc_shifts)
             cyc_summary_df.loc[img_name, info.keys()] = pd.Series(info)
             cyc_summary_df.to_csv(cyc_path/"SNR-summary_cyc.csv")
@@ -389,15 +442,23 @@ class SNRAnalysis:
         if self.single_run:
             print("[Info]Use single run as in 'AcqData' level.")
             cyc_paths = [self.exp_dir]
-        for cyc_path in cyc_paths:
-            if self.output_bgsub:
+        for cyc_path in cyc_paths:   # Iterate folder
+            if self.output_bgsub:   # Make bg-subtracted image folder
                 self.bgsub_output_path =cyc_path/self.bgsub_fn
                 if not os.path.exists(self.bgsub_output_path):
                     os.mkdir(self.bgsub_output_path)
                 print("[INFO]Bg-subtracted Images saving to:",self.bgsub_output_path)
             print("[Info] Performing for cycle:",cyc_path.name)
+            # Analyze per cycle
+            if str(1) not in cyc_path.name:
+                self.use_bg = False
             sum_dfs.append(self.summarize_snr_for_directory(cyc_path))
+            
         summary_df = pd.concat(sum_dfs, axis=0)
+        summary_df = summary_df[['Path','Channel','Bg-Path', 'Mean', 'Std',
+                'Fg mean', 'Bg mean', 'Fg-Bg SNR', 'Spot mean', 'Spot-fg SNR', 'Spot-bg SNR',
+                '(M)Spot mean', '(M)Spot-fg SNR', '(M)Spot-bg SNR',
+                '(BG-sub)Spot mean','(BG-sub)Bg mean','(BG-sub)SBR','Shift','Comment']]
         return summary_df
 
     def main(self):
@@ -420,3 +481,5 @@ if __name__ == "__main__":
     print("[INFO]Experiment folder:",file_path.parent)
     snr_analysis = SNRAnalysis(exp_path=file_path.parent, settings=settings)
     snr_analysis.main()
+
+# %%
