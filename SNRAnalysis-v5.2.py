@@ -154,7 +154,8 @@ class SNRAnalysis:
         # Use either FOVs over Random sampling
         if settings.get('FOV', False) and len(settings.get('FOV', False).split(','))>0:
             self.FOVs = settings.get('FOV', False).split(','); self.num_ranSamples = False
-        else: 
+        else:
+            self.FOVs = False
             self.num_ranSamples = int(settings.get('NumberSamples', 30))
         # Montage
         self.use_montage = int(settings.get('Use_montage', True))
@@ -165,7 +166,9 @@ class SNRAnalysis:
         if self.use_bg and os.path.exists(bg_img_path): 
             self.bg_img_path = bg_img_path; self.use_bg = True
             print("[INFO]Found existing background folder:",bg_img_path)
-        else: self.bg_img_path=None; print("[INFO] Not using background subtraction method.")
+        else: 
+            self.bg_img_path=None; self.use_bg = False
+            print("[INFO] Not using background subtraction method.")
         #
         self.output_bgsub = bool(settings.get('save_bgsub', False))
         self.bgsub_fn = "BG-subtracted"
@@ -413,7 +416,7 @@ class SNRAnalysis:
                 return cyc_summary_df
         else:  # Random Sampling
             if self.num_ranSamples and self.num_ranSamples<len(img_paths):
-                cyc_summary_df = cyc_summary_df.loc[random.sample(cyc_summary_df.index, self.num_ranSamples)]
+                cyc_summary_df = cyc_summary_df.loc[random.sample(list(cyc_summary_df.index), self.num_ranSamples)]
             print("[Info]Randomly select",len(cyc_summary_df),"for analysis.")
         print("[Info]Total", len(cyc_summary_df),"images for analysis.")
         # Spot thres
@@ -431,7 +434,7 @@ class SNRAnalysis:
             #print("[INFO]Intensities:",intensities)
             info = self.calc_S2N(intensities); info["Shift"]=str(cyc_shifts)
             cyc_summary_df.loc[img_name, info.keys()] = pd.Series(info)
-            cyc_summary_df.to_csv(cyc_path/"SNR-summary_cyc.csv")
+            cyc_summary_df.to_csv(cyc_path/("SNR-summary_"+self.cyc_path.name+".csv"))
         return cyc_summary_df
 
     def summarize_snr_for_all(self):
@@ -463,8 +466,8 @@ class SNRAnalysis:
 
     def main(self):
         print("[Info]provided experiment path, finding files.")
-        self.summarize_snr_for_all().to_csv(self.exp_dir/"SNR-summary_all.csv")
-        print("[Info]Summary file saved to:", self.exp_dir/"SNR-summary_all.csv")     
+        self.summarize_snr_for_all().to_csv(self.exp_dir/("SNR-summary_all_"+self.exp_dir.name+".csv"))
+        print("[Info]Summary file saved to:", self.exp_dir/("SNR-summary_all_"+self.exp_dir.name+".csv"))
 
 
 if __name__ == "__main__":
